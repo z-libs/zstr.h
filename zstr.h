@@ -71,6 +71,7 @@
 #endif // Z_COMMON_BUNDLED
 /* ============================================================================ */
 
+
 #ifndef ZSTR_H
 #define ZSTR_H
 // [Bundled] "zcommon.h" is included inline in this same file
@@ -82,6 +83,11 @@
 #include <stdint.h>
 #include <ctype.h>
 #include <stdlib.h> 
+
+// I am thinking of you too, C++ devs.
+#ifdef __cplusplus
+extern "C" {
+#endif
 
 /* Configuration and Macros */
 
@@ -1027,4 +1033,222 @@ static inline bool zstr_split_next(zstr_split_iter *it, zstr_view *out_part)
     #define zstr_autofree  Z_CLEANUP(zstr_free) zstr
 #endif
 
+#ifdef __cplusplus
+} // extern "C"
 #endif
+
+/* C++ Integration Layer -> namespace: zstr */
+
+#ifdef __cplusplus
+
+#include <utility>
+#include <iostream>
+#include <cstring>
+#include <string>
+
+#if __cplusplus >= 201703L
+#include <string_view>
+#endif
+
+namespace zstr
+{
+    class string;
+
+    class view
+    {
+        ::zstr_view inner;
+
+     public:
+        // Iterator traits for view.
+        using value_type      = char;
+        using size_type       = size_t;
+        using difference_type = std::ptrdiff_t;
+        using const_pointer   = const char*;
+        using const_iterator  = const char*;
+
+        view() : inner{NULL, 0} {}
+        view(const char *s) : inner(::zstr_view_from(s)) {}
+        view(const char *s, size_t len) : inner{s, len}  {}
+        view(const string &s);
+        view(const string &&) = delete;
+
+        const char *data() const { return inner.data; }
+        size_t size() const      { return inner.len; }
+        size_t length() const    { return inner.len; }
+        bool empty() const       { return inner.len == 0; }
+
+        const char *begin() const { return inner.data; }
+        const char *end() const   { return inner.data + inner.len; }
+
+        char operator[](size_t idx) const { return inner.data[idx]; }
+
+#       if __cplusplus >= 201703L
+        operator std::string_view() const { return std::string_view(data(), size()); }
+#       endif
+
+        // Comparisons.
+        bool operator==(const char* other) const { return ::zstr_view_eq(inner, other); }
+        bool operator==(const view& other) const { return ::zstr_view_eq_view(inner, other.inner); }
+        bool operator!=(const char* other) const { return !(*this == other); }
+        bool operator!=(const view& other) const { return !(*this == other); }
+    };
+
+    class string
+    {
+        ::zstr inner;
+        friend class view;
+
+        friend bool operator==(const string& lhs, const string& rhs);
+        friend bool operator<(const string& lhs, const string& rhs);
+
+     public:
+        // Iterator traits.
+        using value_type      = char;
+        using size_type       = size_t;
+        using difference_type = std::ptrdiff_t;
+        using pointer         = char*;
+        using const_pointer   = const char*;
+        using iterator        = char*;
+        using const_iterator  = const char*;
+
+        // Default constructor.
+        string() : inner(::zstr_init()) {}
+
+        // C-string constructor.
+        string(const char *s) : inner(::zstr_from(s)) {}
+
+        // Length constructor.
+        string(const char *s, size_t len) : inner(::zstr_from_len(s, len)) {}
+
+        // This one is for C++17 so we put it like this.
+#       if __cplusplus >= 201703L
+        string(std::string_view sv) : inner(::zstr_from_len(sv.data(), sv.size())) {}
+#       endif
+
+        // Copy constructor.
+        string(const string &other) : inner(::zstr_dup(&other.inner)) {}
+
+        // Move constructor (zero cost).
+        string(string &&other) noexcept : inner(other.inner) 
+        {
+        other.inner = ::zstr_init();
+        }
+
+        // Destructor.
+        ~string() { ::zstr_free(&inner); }
+
+        // Copy assignment.
+        string& operator=(const string &other)
+        {
+            if (this != &other)
+            {
+                ::zstr_free(&inner);
+                inner = ::zstr_dup(&other.inner);
+            }
+            return *this;
+        }
+
+        // Move assignment (transfer ownership).
+        string& operator=(string &&other) noexcept
+        {
+            if (this != &other)
+            {
+                ::zstr_free(&inner);
+                inner = other.inner;
+                other.inner = ::zstr_init();
+            }
+            return *this;
+        }
+
+        // Assignment from C-string.
+        string& operator=(const char *s)
+        {
+            ::zstr_free(&inner);
+            inner = ::zstr_from(s);
+            return *this;
+        }
+
+        // Accessors.
+        const char *c_str() const { return ::zstr_cstr(&inner); }
+        const char *data() const  { return ::zstr_cstr(&inner); }
+        char *data()              { return ::zstr_data(&inner); }
+        size_t size() const       { return ::zstr_len(&inner); }
+        size_t length() const     { return ::zstr_len(&inner); }
+        size_t capacity() const   { return inner.is_long ? inner.l.cap : ZSTR_SSO_CAP; }
+        bool is_empty() const     { return ::zstr_is_empty(&inner); }
+
+#       if __cplusplus >= 201703L
+        operator std::string_view() const { return std::string_view(data(), size()); }
+#       endif
+
+        // Iterators.
+        char *begin()             { return ::zstr_data(&inner); }
+        char *end()               { return ::zstr_data(&inner) + size(); }
+        const char *begin() const { return ::zstr_cstr(&inner); }
+        const char *end() const   { return ::zstr_cstr(&inner) + size(); }
+
+        // Modifiers.
+        void clear()             { ::zstr_clear(&inner); }
+        void reserve(size_t cap) { ::zstr_reserve(&inner, cap); }
+        void shrink_to_fit()     { ::zstr_shrink_to_fit(&inner); }
+        
+        void push_back(char c) { ::zstr_push_char(&inner, c); }
+        void pop_back()        { ::zstr_pop_char(&inner); }
+        
+        string& append(const char *s)             { ::zstr_cat(&inner, s); return *this; }
+        string& append(const char *s, size_t len) { ::zstr_cat_len(&inner, s, len); return *this; }
+
+        // Operators.
+        string& operator+=(const char *s)       { return append(s); }
+        string& operator+=(char c)              { push_back(c); return *this; }
+        string& operator+=(const string &other) { return append(other.c_str(), other.size()); }
+
+        char& operator[](size_t idx)             { return ::zstr_data(&inner)[idx]; }
+        const char& operator[](size_t idx) const { return ::zstr_cstr(&inner)[idx]; }
+
+        // Some utilities.
+        void to_lower() { ::zstr_to_lower(&inner); }
+        void to_upper() { ::zstr_to_upper(&inner); }
+        void trim()     { ::zstr_trim(&inner); }
+
+        // Formating.
+        // WARNING: Only POD types (int, double, char*) are safe here.
+        // Passing std::string or objects will crash.
+        template <typename... Args>
+        static string fmt(const char *format, Args... args)
+        {
+            string s;
+            ::zstr_fmt(&s.inner, format, args...);
+            return s;
+        }
+    };
+
+    // View constructor implementation.
+    inline view::view(const string &s) : inner(::zstr_as_view(&s.inner)) {}
+
+    // The global operators...
+    inline std::ostream& operator<<(std::ostream &os, const string &s)
+    {
+        return os.write(s.data(), s.size());
+    }
+
+    inline std::ostream& operator<<(std::ostream &os, const view &s)
+    {
+        return os.write(s.data(), s.size());
+    }
+
+    // Comparison Operators (string vs string).
+    inline bool operator==(const string& lhs, const string& rhs) { return ::zstr_eq(&lhs.inner, &rhs.inner); }
+    inline bool operator!=(const string& lhs, const string& rhs) { return !::zstr_eq(&lhs.inner, &rhs.inner); }
+    inline bool operator<(const string& lhs, const string& rhs)  { return ::zstr_cmp(&lhs.inner, &rhs.inner) < 0; }
+   
+    // Comparison Operators (string vs const char*).
+    inline bool operator==(const string& lhs, const char* rhs) { return strcmp(lhs.c_str(), rhs) == 0; }
+    inline bool operator==(const char* lhs, const string& rhs) { return strcmp(lhs, rhs.c_str()) == 0; }
+    inline bool operator!=(const string& lhs, const char* rhs) { return strcmp(lhs.c_str(), rhs) != 0; }
+    inline bool operator!=(const char* lhs, const string& rhs) { return strcmp(lhs, rhs.c_str()) != 0; }
+}
+
+#endif  // __cplusplus
+
+#endif  // ZSTR_H
