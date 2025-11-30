@@ -92,15 +92,15 @@ extern "C" {
 /* Configuration and Macros */
 
 #ifndef Z_STR_MALLOC
-    #define Z_STR_MALLOC(sz)        Z_MALLOC(sz)
+    #define Z_STR_MALLOC(sz)        (char *)Z_MALLOC(sz)
 #endif
 
 #ifndef Z_STR_CALLOC
-    #define Z_STR_CALLOC(n, sz)     Z_CALLOC(n, sz)
+    #define Z_STR_CALLOC(n, sz)     (char *)Z_CALLOC(n, sz)
 #endif
 
 #ifndef Z_STR_REALLOC
-    #define Z_STR_REALLOC(p, sz)    Z_REALLOC(p, sz)
+    #define Z_STR_REALLOC(p, sz)    (char *)Z_REALLOC(p, sz)
 #endif
 
 #ifndef Z_STR_FREE
@@ -723,7 +723,7 @@ static inline int zstr_cmp(const zstr *a, const zstr *b)
 static inline ptrdiff_t zstr_find(const zstr *s, const char *needle)
 {
     const char *data = zstr_cstr(s);
-    char *found = strstr(data, needle);
+    const char *found = strstr(data, needle);
     if (!found) return -1;
     return (ptrdiff_t)(found - data);
 }
@@ -1050,7 +1050,7 @@ static inline bool zstr_split_next(zstr_split_iter *it, zstr_view *out_part)
 #include <string_view>
 #endif
 
-namespace zstr
+namespace z_str
 {
     class string;
 
@@ -1099,6 +1099,7 @@ namespace zstr
         friend class view;
 
         friend bool operator==(const string& lhs, const string& rhs);
+        friend bool operator!=(const string& lhs, const string& rhs);
         friend bool operator<(const string& lhs, const string& rhs);
 
      public:
