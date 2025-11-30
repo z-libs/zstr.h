@@ -190,34 +190,74 @@ void log_status()
 
 ## API Reference (C++)
 
-The C++ wrapper is lightweight and holds a `zstr` C struct internally. It is defined in the `z_str` namespace.
+The C++ wrapper is defined in the **`z_str`** namespace to avoid collisions with the C struct. It strictly adheres to RAII principles and is designed to drop into existing C++11/17 projects.
 
 ### `class z_str::string`
+
+An owning string class that internally manages a `zstr` struct.
+
+**Constructors & Management**
 
 | Method | Description |
 | :--- | :--- |
 | `string()` | Default constructor (empty). |
 | `string(const char*)` | Construct from C-string. |
 | `string(std::string_view)` | Construct from C++17 string view. |
+| `own(ptr, len, cap)` | **Static**. Wraps an existing `malloc`'d buffer without copying. |
+| `from_file(path)` | **Static**. Reads entire file into a string. |
+| `release()` | Returns the raw `char*` and empties the object. **Caller must `free()`**. |
+
+**Access & Iterators**
+
+| Method | Description |
+| :--- | :--- |
 | `c_str()`, `data()` | Returns `const char*`. |
-| `size()`, `length()` | Returns length. |
-| `append(str)` / `+=` | Append text. |
-| `fmt(fmt, ...)` | **Static** method. Creates a string via printf formatting. **Warning:** Pass only POD types (`int`, `float`, `char*`), not C++ objects. |
-| `begin()`, `end()` | Standard iterators (pointers). |
+| `size()`, `length()` | Returns length in bytes. |
+| `capacity()` | Returns current allocated capacity. |
+| `is_empty()` | Returns `true` if length is 0. |
+| `operator[]` | Mutable/Const access to character at index. |
+| `front()`, `back()` | Access first/last character. |
+| `begin()`, `end()` | Standard iterators (pointers) compatible with STL algorithms. |
+
+**Modification**
+
+| Method | Description |
+| :--- | :--- |
+| `append(s)` / `+=` | Appends C-string, character, or other `z_str::string`. |
+| `push_back(c)` | Appends a single char. |
+| `pop_back()` | Removes and returns the last char. |
+| `replace(old, new)` | Replaces all occurrences of string `old` with `new`. |
+| `to_lower()`, `to_upper()`| In-place case conversion (ASCII). |
+| `trim()` | In-place whitespace removal. |
+| `clear()` | Sets length to 0 (capacity remains). |
+| `fmt(fmt, ...)` | **Static**. Creates a string via printf formatting. <br>**Warning:** Pass only POD types (`int`, `char*`), not C++ objects. |
+
+**Search & Utilities**
+
+| Method | Description |
+| :--- | :--- |
+| `find(needle)` | Returns index of substring or -1. |
+| `contains(needle)` | Returns `true` if substring exists. |
+| `starts_with(s)` | Returns `true` if string starts with `s`. |
+| `ends_with(s)` | Returns `true` if string ends with `s`. |
+| `split(delim)` | Returns a `split_iterable` for use in range-based for loops. <br>**Safety:** Deleted for r-values (temporaries) to prevent dangling views. |
+| `rune_count()` | Returns the number of UTF-8 code points. |
+| `is_valid_utf8()` | Returns `true` if the string contains valid UTF-8. |
+
+---
 
 ### `class z_str::view`
 
-A lightweight wrapper around `zstr_view` that is compatible with `std::string_view`.
+A lightweight, non-owning wrapper around `zstr_view`. Compatible with `std::string_view` (C++17).
 
 | Method | Description |
 | :--- | :--- |
 | `view(string&)` | Implicit conversion from `z_str::string`. |
-| `operator[]` | Access character at index. |
-| `lstrip()`, `rstrip()` | (Via C API helpers) Trims whitespace. |
-
-> Note: The C++ API is still growing.
-
----
+| `sub(start, len)` | Returns a new view slice. |
+| `lstrip()`, `rstrip()`, `trim()` | Returns a new view with whitespace removed. |
+| `to_int(out)` | Parses view to integer. Returns `true` on success. |
+| `starts_with`, `ends_with` | Predicate checks. |
+| `operator==` | Compares with `view`, `string`, or `const char*`. |
 
 ## Memory Management
 
