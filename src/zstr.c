@@ -1250,8 +1250,14 @@ static inline int zstr_cat_bulk(zstr *dest, const char **sources, size_t count)
     }
     *p = '\0';
     
-    if (dest->is_long) dest->l.len = req_cap;
-    else dest->s.len = (uint8_t)req_cap;
+    // Update length to the actual final length (not capacity)
+    size_t final_len = cur_len + total_len;
+    if (dest->is_long) {
+        dest->l.len = final_len;
+    } else {
+        // For SSO, this should never exceed ZSTR_SSO_CAP due to reserve() above
+        dest->s.len = (uint8_t)final_len;
+    }
     
     return Z_OK;
 }
