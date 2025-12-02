@@ -252,9 +252,11 @@ static inline void zstr_clear(zstr *s)
 
 // Ensures the string has at least `new_cap` capacity.
 // Handles the transition from SSO (Stack) to Long (Heap).
+// Note: SSO can hold up to ZSTR_SSO_CAP-1 characters (+ null terminator)
 static inline int zstr_reserve(zstr *s, size_t new_cap)
 {
-    if (new_cap <= ZSTR_SSO_CAP) return Z_OK;
+    // SSO can hold strings of length 0 to ZSTR_SSO_CAP-1 (need space for null terminator)
+    if (new_cap < ZSTR_SSO_CAP) return Z_OK;
     if (s->is_long && new_cap <= s->l.cap) return Z_OK;
 
     char *new_ptr;
@@ -437,12 +439,20 @@ static inline zstr zstr_read_file(const char *path)
         return s;
     }
 
-    // Pre-allocate the exact needed capacity
-    if (zstr_reserve(&s, (size_t)length) != Z_OK) 
+    // Pre-allocate the needed capacity
+    // Note: reserve() expects capacity for the string content, not including null terminator
+    // For files >= ZSTR_SSO_CAP bytes, we need heap allocation
+    size_t file_size = (size_t)length;
+    if (file_size >= ZSTR_SSO_CAP)
     {
-        fclose(f);
-        return s;
+        // Need heap allocation - reserve space for the file content
+        if (zstr_reserve(&s, file_size) != Z_OK) 
+        {
+            fclose(f);
+            return s;
+        }
     }
+    // else: file fits in SSO buffer (file_size < ZSTR_SSO_CAP means <= 22 bytes)
 
     char *buf = zstr_data(&s);
     
@@ -480,12 +490,15 @@ static inline zstr zstr_read_file(const char *path)
     if (s.is_long) {
         s.l.len = total_read;
     } else {
-        // Defensive check: SSO can only hold up to ZSTR_SSO_CAP bytes
-        if (total_read <= ZSTR_SSO_CAP) {
+        // Defensive check: SSO can only hold up to ZSTR_SSO_CAP-1 bytes (need space for null terminator)
+        // This branch should only be taken if reserve() didn't transition to long mode
+        if (total_read < ZSTR_SSO_CAP) {
             s.s.len = (uint8_t)total_read;
         } else {
-            // This shouldn't happen if reserve worked correctly, but handle it
-            s.s.len = ZSTR_SSO_CAP;
+            // This shouldn't happen if reserve worked correctly, but handle it safely
+            // Truncate to max SSO length minus null terminator
+            buf[ZSTR_SSO_CAP - 1] = '\0';
+            s.s.len = ZSTR_SSO_CAP - 1;
         }
     }
 

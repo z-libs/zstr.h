@@ -75,11 +75,23 @@ void bench_file_io()
 {
     printf("\n=== File I/O Benchmark ===\n");
     
-    // Create a test file
-    const char *test_file = "/tmp/zstr_test.txt";
+    // Create a test file in a portable way
+    // Try to use system temp directory
+    const char *temp_dir = getenv("TMPDIR");
+    if (!temp_dir) temp_dir = getenv("TEMP");
+    if (!temp_dir) temp_dir = getenv("TMP");
+#ifdef _WIN32
+    if (!temp_dir) temp_dir = "C:\\Windows\\Temp";
+#else
+    if (!temp_dir) temp_dir = "/tmp";
+#endif
+    
+    char test_file[512];
+    snprintf(test_file, sizeof(test_file), "%s/zstr_test.txt", temp_dir);
+    
     FILE *f = fopen(test_file, "w");
     if (!f) {
-        printf("Error: Could not create test file\n");
+        printf("Error: Could not create test file at %s\n", test_file);
         return;
     }
     
