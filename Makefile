@@ -20,6 +20,14 @@ ifeq ($(USE_MIMALLOC), 1)
     LDFLAGS += -lmimalloc
 endif
 
+# Optional: Enable OpenMP for parallel operations
+# Set USE_OPENMP=1 to enable (e.g., make USE_OPENMP=1 bench_advanced)
+USE_OPENMP ?= 0
+ifeq ($(USE_OPENMP), 1)
+    CFLAGS  += -fopenmp
+    LDFLAGS += -fopenmp
+endif
+
 # Standard Lua (Default: 5.4)
 LUA_STD_VER = lua5.4
 LUA_STD_INC = /usr/include/$(LUA_STD_VER)
@@ -59,6 +67,8 @@ help:
 	@echo "  make bench_c        - Run C benchmarks (zstr vs Malloc)"
 	@echo "  make bench_sds      - Run SDS comparison benchmarks"
 	@echo "  make bench_optimized - Run optimization benchmarks (alignment, I/O, cache)"
+	@echo "  make bench_advanced - Run advanced benchmarks (SIMD, Prefetch, OpenMP)"
+	@echo "  make bench_comprehensive - Run comprehensive benchmark suite"
 	@echo "  make bench_lua      - Run Lua benchmarks"
 	@echo ""
 	@echo "Maintenance:"
@@ -69,6 +79,8 @@ help:
 	@echo "Options:"
 	@echo "  USE_MIMALLOC=1      - Enable mimalloc allocator for benchmarks"
 	@echo "                        Example: make USE_MIMALLOC=1 bench_c"
+	@echo "  USE_OPENMP=1        - Enable OpenMP parallelization"
+	@echo "                        Example: make USE_OPENMP=1 USE_MIMALLOC=1 bench_advanced"
 	@echo ""
 	@echo "Quick Start:"
 	@echo "  1. make init        # Initialize submodules"
@@ -149,16 +161,42 @@ endif
 	@echo "Running..."
 	./$(BENCH_DIR)/bench_optimized
 
-bench: bench_c bench_sds bench_lua bench_optimized
+# Advanced optimization benchmark (SIMD, Prefetch, OpenMP)
+bench_advanced: bundle
+	@echo "=> Compiling advanced optimization benchmarks"
+ifeq ($(USE_MIMALLOC), 1)
+	@echo "   Using mimalloc allocator"
+endif
+ifeq ($(USE_OPENMP), 1)
+	@echo "   Using OpenMP parallelization"
+endif
+	$(CC) $(CFLAGS) -o $(BENCH_DIR)/bench_advanced $(BENCH_DIR)/bench_advanced.c -I. $(LDFLAGS)
+	@echo "Running..."
+	./$(BENCH_DIR)/bench_advanced
+
+# Comprehensive benchmark suite (all optimizations)
+bench_comprehensive: bundle
+	@echo "=> Compiling comprehensive benchmark suite"
+ifeq ($(USE_MIMALLOC), 1)
+	@echo "   Using mimalloc allocator"
+endif
+ifeq ($(USE_OPENMP), 1)
+	@echo "   Using OpenMP parallelization"
+endif
+	$(CC) $(CFLAGS) -o $(BENCH_DIR)/bench_comprehensive $(BENCH_DIR)/bench_comprehensive.c -I. $(LDFLAGS)
+	@echo "Running..."
+	./$(BENCH_DIR)/bench_comprehensive
+
+bench: bench_c bench_sds bench_lua bench_optimized bench_advanced bench_comprehensive
 
 
 clean:
 	@echo "Cleaning build artifacts..."
 	@rm -f $(LUA_OUT)
-	@rm -f $(BENCH_DIR)/bench_c $(BENCH_DIR)/bench_sds $(BENCH_DIR)/bench_optimized
+	@rm -f $(BENCH_DIR)/bench_c $(BENCH_DIR)/bench_sds $(BENCH_DIR)/bench_optimized $(BENCH_DIR)/bench_advanced $(BENCH_DIR)/bench_comprehensive
 	@echo "Done. (SDS files kept - use 'rm -f $(BENCH_DIR)/sds*' to remove)"
 
 init:
 	git submodule update --init --recursive
 
-.PHONY: all bundle lua luajit build_shared bench bench_c bench_sds bench_lua download_sds clean init
+.PHONY: all bundle lua luajit build_shared bench bench_c bench_sds bench_lua bench_advanced bench_comprehensive download_sds clean init

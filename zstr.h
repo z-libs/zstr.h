@@ -136,6 +136,48 @@ extern "C" {
 // Alias macro for pushing a single char.
 #define zstr_push(s, c) zstr_push_char(s, c)
 
+/* Advanced Optimization Features */
+
+// Detect SIMD capabilities (portable across compilers)
+// Note: Uses #elif to select the highest available instruction set.
+// This is intentional - each level includes all lower levels' functionality.
+#if defined(__AVX2__)
+    #define ZSTR_HAS_AVX2 1
+    #include <immintrin.h>
+#elif defined(__SSE4_2__)
+    #define ZSTR_HAS_SSE42 1
+    #include <nmmintrin.h>
+#elif defined(__SSE2__) || (defined(_MSC_VER) && (defined(_M_X64) || defined(_M_AMD64)))
+    #define ZSTR_HAS_SSE2 1
+    #include <emmintrin.h>
+#endif
+
+// Prefetch support (portable)
+#if defined(__GNUC__) || defined(__clang__)
+    #define ZSTR_PREFETCH(addr) __builtin_prefetch(addr, 0, 3)
+#elif defined(_MSC_VER)
+    #include <intrin.h>
+    #define ZSTR_PREFETCH(addr) _mm_prefetch((const char*)(addr), _MM_HINT_T0)
+#else
+    #define ZSTR_PREFETCH(addr) ((void)0)
+#endif
+
+// OpenMP support detection
+#ifdef _OPENMP
+    #include <omp.h>
+    #define ZSTR_HAS_OPENMP 1
+#endif
+
+// Configuration: Minimum size for using SIMD optimizations
+#ifndef ZSTR_SIMD_THRESHOLD
+    #define ZSTR_SIMD_THRESHOLD 32
+#endif
+
+// Configuration: Minimum batch size for parallel operations
+#ifndef ZSTR_PARALLEL_THRESHOLD
+    #define ZSTR_PARALLEL_THRESHOLD 1000
+#endif
+
 /* Data Structures */
 
 // Heap allocated string layout.
@@ -641,7 +683,46 @@ static inline void zstr_to_lower(zstr *s)
 {
     char *p = zstr_data(s);
     size_t len = zstr_len(s);
-    for (size_t i = 0; i < len; i++)
+    size_t i = 0;
+    
+#if defined(ZSTR_HAS_AVX2)
+    // AVX2 SIMD optimization for large strings
+    if (len >= 32) {
+        const __m256i A = _mm256_set1_epi8('A');
+        const __m256i Z = _mm256_set1_epi8('Z');
+        const __m256i diff = _mm256_set1_epi8('a' - 'A');
+        
+        for (; i + 32 <= len; i += 32) {
+            __m256i data = _mm256_loadu_si256((__m256i*)(p + i));
+            __m256i mask = _mm256_and_si256(
+                _mm256_cmpgt_epi8(data, _mm256_sub_epi8(A, _mm256_set1_epi8(1))),
+                _mm256_cmpgt_epi8(_mm256_add_epi8(Z, _mm256_set1_epi8(1)), data)
+            );
+            __m256i lower = _mm256_add_epi8(data, _mm256_and_si256(mask, diff));
+            _mm256_storeu_si256((__m256i*)(p + i), lower);
+        }
+    }
+#elif defined(ZSTR_HAS_SSE2)
+    // SSE2 SIMD optimization for medium strings
+    if (len >= 16) {
+        const __m128i A = _mm_set1_epi8('A');
+        const __m128i Z = _mm_set1_epi8('Z');
+        const __m128i diff = _mm_set1_epi8('a' - 'A');
+        
+        for (; i + 16 <= len; i += 16) {
+            __m128i data = _mm_loadu_si128((__m128i*)(p + i));
+            __m128i mask = _mm_and_si128(
+                _mm_cmpgt_epi8(data, _mm_sub_epi8(A, _mm_set1_epi8(1))),
+                _mm_cmpgt_epi8(_mm_add_epi8(Z, _mm_set1_epi8(1)), data)
+            );
+            __m128i lower = _mm_add_epi8(data, _mm_and_si128(mask, diff));
+            _mm_storeu_si128((__m128i*)(p + i), lower);
+        }
+    }
+#endif
+    
+    // Process remaining bytes
+    for (; i < len; i++)
     {
         p[i] = (char)tolower((unsigned char)p[i]);
     }
@@ -652,7 +733,46 @@ static inline void zstr_to_upper(zstr *s)
 {
     char *p = zstr_data(s);
     size_t len = zstr_len(s);
-    for (size_t i = 0; i < len; i++)
+    size_t i = 0;
+    
+#if defined(ZSTR_HAS_AVX2)
+    // AVX2 SIMD optimization for large strings
+    if (len >= 32) {
+        const __m256i a = _mm256_set1_epi8('a');
+        const __m256i z = _mm256_set1_epi8('z');
+        const __m256i diff = _mm256_set1_epi8('A' - 'a');
+        
+        for (; i + 32 <= len; i += 32) {
+            __m256i data = _mm256_loadu_si256((__m256i*)(p + i));
+            __m256i mask = _mm256_and_si256(
+                _mm256_cmpgt_epi8(data, _mm256_sub_epi8(a, _mm256_set1_epi8(1))),
+                _mm256_cmpgt_epi8(_mm256_add_epi8(z, _mm256_set1_epi8(1)), data)
+            );
+            __m256i upper = _mm256_add_epi8(data, _mm256_and_si256(mask, diff));
+            _mm256_storeu_si256((__m256i*)(p + i), upper);
+        }
+    }
+#elif defined(ZSTR_HAS_SSE2)
+    // SSE2 SIMD optimization for medium strings
+    if (len >= 16) {
+        const __m128i a = _mm_set1_epi8('a');
+        const __m128i z = _mm_set1_epi8('z');
+        const __m128i diff = _mm_set1_epi8('A' - 'a');
+        
+        for (; i + 16 <= len; i += 16) {
+            __m128i data = _mm_loadu_si128((__m128i*)(p + i));
+            __m128i mask = _mm_and_si128(
+                _mm_cmpgt_epi8(data, _mm_sub_epi8(a, _mm_set1_epi8(1))),
+                _mm_cmpgt_epi8(_mm_add_epi8(z, _mm_set1_epi8(1)), data)
+            );
+            __m128i upper = _mm_add_epi8(data, _mm_and_si128(mask, diff));
+            _mm_storeu_si128((__m128i*)(p + i), upper);
+        }
+    }
+#endif
+    
+    // Process remaining bytes
+    for (; i < len; i++)
     {
         p[i] = (char)toupper((unsigned char)p[i]);
     }
@@ -768,8 +888,76 @@ static inline bool zstr_eq_ignore_case(const zstr *a, const zstr *b)
     
     const char *p1 = zstr_cstr(a);
     const char *p2 = zstr_cstr(b);
+    size_t i = 0;
     
-    for (size_t i = 0; i < len; i++) {
+#if defined(ZSTR_HAS_AVX2)
+    // AVX2 SIMD optimization
+    if (len >= 32) {
+        const __m256i A_up = _mm256_set1_epi8('A');
+        const __m256i Z_up = _mm256_set1_epi8('Z');
+        const __m256i to_lower = _mm256_set1_epi8('a' - 'A');
+        
+        for (; i + 32 <= len; i += 32) {
+            __m256i v1 = _mm256_loadu_si256((__m256i*)(p1 + i));
+            __m256i v2 = _mm256_loadu_si256((__m256i*)(p2 + i));
+            
+            // Convert both to lowercase
+            __m256i mask1 = _mm256_and_si256(
+                _mm256_cmpgt_epi8(v1, _mm256_sub_epi8(A_up, _mm256_set1_epi8(1))),
+                _mm256_cmpgt_epi8(_mm256_add_epi8(Z_up, _mm256_set1_epi8(1)), v1)
+            );
+            __m256i lower1 = _mm256_add_epi8(v1, _mm256_and_si256(mask1, to_lower));
+            
+            __m256i mask2 = _mm256_and_si256(
+                _mm256_cmpgt_epi8(v2, _mm256_sub_epi8(A_up, _mm256_set1_epi8(1))),
+                _mm256_cmpgt_epi8(_mm256_add_epi8(Z_up, _mm256_set1_epi8(1)), v2)
+            );
+            __m256i lower2 = _mm256_add_epi8(v2, _mm256_and_si256(mask2, to_lower));
+            
+            // Compare
+            __m256i cmp = _mm256_cmpeq_epi8(lower1, lower2);
+            // movemask returns 0xFFFFFFFF when all bytes match
+            if ((uint32_t)_mm256_movemask_epi8(cmp) != 0xFFFFFFFF) {
+                return false;
+            }
+        }
+    }
+#elif defined(ZSTR_HAS_SSE2)
+    // SSE2 SIMD optimization
+    if (len >= 16) {
+        const __m128i A_up = _mm_set1_epi8('A');
+        const __m128i Z_up = _mm_set1_epi8('Z');
+        const __m128i to_lower = _mm_set1_epi8('a' - 'A');
+        
+        for (; i + 16 <= len; i += 16) {
+            __m128i v1 = _mm_loadu_si128((__m128i*)(p1 + i));
+            __m128i v2 = _mm_loadu_si128((__m128i*)(p2 + i));
+            
+            // Convert both to lowercase
+            __m128i mask1 = _mm_and_si128(
+                _mm_cmpgt_epi8(v1, _mm_sub_epi8(A_up, _mm_set1_epi8(1))),
+                _mm_cmpgt_epi8(_mm_add_epi8(Z_up, _mm_set1_epi8(1)), v1)
+            );
+            __m128i lower1 = _mm_add_epi8(v1, _mm_and_si128(mask1, to_lower));
+            
+            __m128i mask2 = _mm_and_si128(
+                _mm_cmpgt_epi8(v2, _mm_sub_epi8(A_up, _mm_set1_epi8(1))),
+                _mm_cmpgt_epi8(_mm_add_epi8(Z_up, _mm_set1_epi8(1)), v2)
+            );
+            __m128i lower2 = _mm_add_epi8(v2, _mm_and_si128(mask2, to_lower));
+            
+            // Compare
+            __m128i cmp = _mm_cmpeq_epi8(lower1, lower2);
+            // movemask returns 0xFFFF when all 16 bytes match
+            if ((uint16_t)_mm_movemask_epi8(cmp) != 0xFFFF) {
+                return false;
+            }
+        }
+    }
+#endif
+    
+    // Process remaining bytes
+    for (; i < len; i++) {
         if (tolower((unsigned char)p1[i]) != tolower((unsigned char)p2[i])) {
             return false;
         }
@@ -1095,6 +1283,151 @@ static inline bool zstr_split_next(zstr_split_iter *it, zstr_view *out_part)
     
     return true;
 }
+
+
+/* Bulk Operations with Prefetch and Parallel Optimization */
+
+// Bulk concatenation with prefetch optimization
+// Concatenates multiple strings with optional prefetch for better cache performance
+static inline int zstr_cat_bulk(zstr *dest, const char **sources, size_t count)
+{
+    if (count == 0) return Z_OK;
+    
+    // Calculate total length needed
+    size_t total_len = 0;
+    for (size_t i = 0; i < count; i++)
+    {
+        // Prefetch next string for better cache performance
+        if (i + 1 < count) {
+            ZSTR_PREFETCH(sources[i + 1]);
+        }
+        total_len += strlen(sources[i]);
+    }
+    
+    // Pre-allocate if needed
+    size_t cur_len = zstr_len(dest);
+    size_t final_len = cur_len + total_len;
+    
+    // Only reallocate if current capacity is insufficient
+    // For SSO: capacity is ZSTR_SSO_CAP-1 (need space for null terminator)
+    // For heap: capacity is the max length without null terminator
+    size_t max_len = dest->is_long ? dest->l.cap : (ZSTR_SSO_CAP - 1);
+    if (final_len > max_len)
+    {
+        if (zstr_reserve(dest, final_len) != Z_OK) return Z_ERR;
+    }
+    
+    // Concatenate all strings
+    char *p = zstr_data(dest) + cur_len;
+    for (size_t i = 0; i < count; i++)
+    {
+        if (i + 1 < count) {
+            ZSTR_PREFETCH(sources[i + 1]);
+        }
+        size_t len = strlen(sources[i]);
+        memcpy(p, sources[i], len);
+        p += len;
+    }
+    *p = '\0';
+    
+    // Update length to the actual final length (not capacity)
+    if (dest->is_long) {
+        dest->l.len = final_len;
+    } else {
+        // For SSO, final_len must be < ZSTR_SSO_CAP due to reserve() check above
+        // This assert helps catch logic errors in debug builds
+        #ifdef NDEBUG
+            dest->s.len = (uint8_t)final_len;
+        #else
+            if (final_len >= ZSTR_SSO_CAP) {
+                // This should never happen if reserve() worked correctly
+                return Z_ERR;
+            }
+            dest->s.len = (uint8_t)final_len;
+        #endif
+    }
+    
+    return Z_OK;
+}
+
+// Bulk free operation with optional parallel execution
+static inline void zstr_free_bulk(zstr *strings, size_t count)
+{
+#if defined(ZSTR_HAS_OPENMP) && ZSTR_HAS_OPENMP
+    // Only use parallel for large batches (overhead of thread creation)
+    if (count >= ZSTR_PARALLEL_THRESHOLD)
+    {
+        #pragma omp parallel for schedule(static)
+        for (size_t i = 0; i < count; i++)
+        {
+            zstr_free(&strings[i]);
+        }
+        return;
+    }
+#endif
+    
+    // Sequential with prefetch
+    for (size_t i = 0; i < count; i++)
+    {
+        if (i + 1 < count) {
+            ZSTR_PREFETCH(&strings[i + 1]);
+        }
+        zstr_free(&strings[i]);
+    }
+}
+
+// Bulk uppercase conversion with optional parallel execution
+static inline void zstr_to_upper_bulk(zstr *strings, size_t count)
+{
+#if defined(ZSTR_HAS_OPENMP) && ZSTR_HAS_OPENMP
+    // Only use parallel for large batches
+    if (count >= ZSTR_PARALLEL_THRESHOLD)
+    {
+        #pragma omp parallel for schedule(static)
+        for (size_t i = 0; i < count; i++)
+        {
+            zstr_to_upper(&strings[i]);
+        }
+        return;
+    }
+#endif
+    
+    // Sequential with prefetch
+    for (size_t i = 0; i < count; i++)
+    {
+        if (i + 1 < count) {
+            ZSTR_PREFETCH(&strings[i + 1]);
+        }
+        zstr_to_upper(&strings[i]);
+    }
+}
+
+// Bulk lowercase conversion with optional parallel execution
+static inline void zstr_to_lower_bulk(zstr *strings, size_t count)
+{
+#if defined(ZSTR_HAS_OPENMP) && ZSTR_HAS_OPENMP
+    // Only use parallel for large batches
+    if (count >= ZSTR_PARALLEL_THRESHOLD)
+    {
+        #pragma omp parallel for schedule(static)
+        for (size_t i = 0; i < count; i++)
+        {
+            zstr_to_lower(&strings[i]);
+        }
+        return;
+    }
+#endif
+    
+    // Sequential with prefetch
+    for (size_t i = 0; i < count; i++)
+    {
+        if (i + 1 < count) {
+            ZSTR_PREFETCH(&strings[i + 1]);
+        }
+        zstr_to_lower(&strings[i]);
+    }
+}
+
 
 #if defined(Z_HAS_CLEANUP) && Z_HAS_CLEANUP
     #define zstr_autofree  Z_CLEANUP(zstr_free) zstr

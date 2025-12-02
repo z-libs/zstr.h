@@ -2,6 +2,8 @@
 
 This document describes the performance optimizations implemented in zstr.h and how to take advantage of them.
 
+> **Note**: For advanced optimizations including SIMD, Prefetch, and OpenMP, see [ADVANCED_OPTIMIZATIONS.md](ADVANCED_OPTIMIZATIONS.md)
+
 ## Overview
 
 The following optimizations have been implemented:
@@ -10,6 +12,9 @@ The following optimizations have been implemented:
 2. **Cache-Aligned Data Structures** - Optimized memory layout for better cache utilization
 3. **Optimized File I/O** - Chunked reading with better buffer alignment
 4. **Enhanced Benchmarking** - Comprehensive performance testing suite
+5. **SIMD Optimizations** - Vectorized string operations (AVX2/SSE2) - See [ADVANCED_OPTIMIZATIONS.md](ADVANCED_OPTIMIZATIONS.md)
+6. **Prefetch Hints** - Cache prefetching for bulk operations - See [ADVANCED_OPTIMIZATIONS.md](ADVANCED_OPTIMIZATIONS.md)
+7. **OpenMP Parallelization** - Multi-threaded bulk processing - See [ADVANCED_OPTIMIZATIONS.md](ADVANCED_OPTIMIZATIONS.md)
 
 ## 1. mimalloc Integration
 
