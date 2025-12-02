@@ -8,6 +8,29 @@
 
 #define ZSTR_LUA_MT "zstr_mt"
 
+/* For compatibility. */
+
+// Lua 5.1 and LuaJIT use lua_objlen instead of lua_rawlen.
+// We define it if it's missing.
+#if !defined(lua_rawlen) && (!defined(LUA_VERSION_NUM) || LUA_VERSION_NUM < 502)
+    #define lua_rawlen lua_objlen
+#endif
+
+// We define our own setfuncs helper to avoid conflicts with 
+static void z_setfuncs(lua_State *L, const luaL_Reg *l, int nup) 
+{
+    luaL_checkstack(L, nup, "too many upvalues");
+    for (; l->name != NULL; l++) 
+    {  
+        int i;
+        for (i = 0; i < nup; i++) 
+            lua_pushvalue(L, -nup);
+        lua_pushcclosure(L, l->func, nup); 
+        lua_setfield(L, -(nup + 2), l->name);
+    }
+    lua_pop(L, nup); 
+}
+
 /* Helpers. */
 
 static zstr* check_zstr(lua_State *L, int index) 
@@ -66,14 +89,104 @@ static int l_zstr_gc(lua_State *L)
 static int l_zstr_append(lua_State *L) 
 {
     zstr *s = check_zstr(L, 1);
-    int n = lua_gettop(L);
-    for (int i = 2; i <= n; i++) 
+    int nargs = lua_gettop(L);
+    
+    size_t total_add_len = 0;
+    for (int i = 2; i <= nargs; i++) 
     {
         size_t len;
-        const char *txt = luaL_checklstring(L, i, &len);
-        zstr_cat_len(s, txt, len);
+        if (lua_isstring(L, i)) 
+        {
+            lua_tolstring(L, i, &len);
+            total_add_len += len;
+        }
     }
-    lua_pushvalue(L, 1); // Return self.
+
+    if (total_add_len > 0) 
+    {
+        size_t current_len = zstr_len(s);
+        size_t required = current_len + total_add_len;
+        
+        size_t cap = s->is_long ? s->l.cap : ZSTR_SSO_CAP;
+        if (required > cap) 
+        {
+             zstr_reserve(s, required);
+        }
+
+        char *ptr = zstr_data(s) + current_len;
+        
+        for (int i = 2; i <= nargs; i++) 
+        {
+            size_t len;
+            const char *str = lua_tolstring(L, i, &len);
+            if (str) 
+            {
+                memcpy(ptr, str, len);
+                ptr += len;
+            }
+        }
+        
+        *ptr = '\0';
+        if (s->is_long) s->l.len += total_add_len;
+        else s->s.len += (uint8_t)total_add_len;
+    }
+
+    lua_pushvalue(L, 1);
+    return 1;
+}
+
+static int l_zstr_append_table(lua_State *L) 
+{
+    zstr *s = check_zstr(L, 1);
+    luaL_checktype(L, 2, LUA_TTABLE);
+    
+    size_t total_add_len = 0;
+    size_t n = lua_rawlen(L, 2); 
+    
+    for (size_t i = 1; i <= n; i++) 
+    {
+        lua_rawgeti(L, 2, i);
+        size_t len;
+        if (lua_isstring(L, -1)) 
+        {
+            lua_tolstring(L, -1, &len);
+            total_add_len += len;
+        }
+        lua_pop(L, 1);
+    }
+
+    if (total_add_len > 0) 
+    {
+        size_t current_len = zstr_len(s);
+        size_t required = current_len + total_add_len;
+        
+        size_t cap = s->is_long ? s->l.cap : ZSTR_SSO_CAP;
+        if (required > cap) 
+        {
+             zstr_reserve(s, required);
+        }
+        
+        char *ptr = zstr_data(s) + current_len;
+        
+        for (size_t i = 1; i <= n; i++) 
+        {
+            lua_rawgeti(L, 2, i);
+            size_t len;
+            const char *str = lua_tolstring(L, -1, &len);
+            if (str) 
+            {
+                memcpy(ptr, str, len);
+                ptr += len;
+            }
+            lua_pop(L, 1);
+        }
+        
+        *ptr = '\0';
+        if (s->is_long) s->l.len += total_add_len;
+        else s->s.len += (uint8_t)total_add_len;
+    }
+
+    lua_pushvalue(L, 1);
     return 1;
 }
 
@@ -267,7 +380,6 @@ static int l_zstr_concat(lua_State *L)
     luaL_Buffer b;
     luaL_buffinit(L, &b);
     
-    // Arg 1.
     if (lua_isuserdata(L, 1)) 
     {
         zstr *s = check_zstr(L, 1);
@@ -278,7 +390,6 @@ static int l_zstr_concat(lua_State *L)
         luaL_addvalue(&b);
     }
     
-    // Arg 2.
     if (lua_isuserdata(L, 2)) 
     {
         zstr *s = check_zstr(L, 2);
@@ -301,6 +412,7 @@ static const luaL_Reg zstr_methods[] = {
     
     // Buffer.
     {"append",      l_zstr_append},
+    {"append_table",l_zstr_append_table},
     {"pop",         l_zstr_pop},
     {"reserve",     l_zstr_reserve},
     {"shrink",      l_zstr_shrink},
@@ -340,7 +452,7 @@ static inline int zstr_register_lib(lua_State *L)
     luaL_newmetatable(L, ZSTR_LUA_MT);
     lua_pushvalue(L, -1);
     lua_setfield(L, -2, "__index");
-    luaL_setfuncs(L, zstr_methods, 0);
+    z_setfuncs(L, zstr_methods, 0);
     return 1;
 }
 
