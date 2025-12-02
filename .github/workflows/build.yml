@@ -34,10 +34,10 @@ jobs:
           echo "Submodule updated to latest remote version."
 
       - name: Run Make
-        run: make
+        run: make bundle
 
       - name: Commit and Push changes
         uses: stefanzweifel/git-auto-commit-action@v5
         with:
           commit_message: "Auto-update: Bump z-core [skip ci]"
-          file_pattern: '.'
+          file_pattern: 'include/zstr.h zstr.h'
