@@ -1007,6 +1007,8 @@ static inline bool zstr_split_next(zstr_split_iter *it, zstr_view *out_part)
     const char *start = it->source.data + it->current_pos;
     size_t remaining = it->source.len - it->current_pos;
     
+    if (remaining == 0) return false;
+    
     size_t found_at = remaining;
     
     for (size_t i = 0; i <= remaining - it->delim.len; i++) 
