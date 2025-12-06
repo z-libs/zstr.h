@@ -50,6 +50,7 @@ extern "C" {
 #ifndef ZSTR_FMT
 #define ZSTR_FMT "%.*s"
 #define ZSTR_ARG(s) (int)zstr_len(&(s)), zstr_cstr(&(s))
+#define ZSV_ARG(v)  (int)(v).len, (v).data
 #endif
 
 // Alias macro for pushing a single char.
