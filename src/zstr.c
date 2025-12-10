@@ -19,20 +19,29 @@ extern "C" {
 
 /* Configuration and Macros */
 
-#ifndef Z_STR_MALLOC
-    #define Z_STR_MALLOC(sz)        (char *)Z_MALLOC(sz)
-#endif
+// Optional mimalloc integration for better performance
+#ifdef USE_MIMALLOC
+    #include <mimalloc.h>
+    #define Z_STR_MALLOC(sz)        (char *)mi_malloc(sz)
+    #define Z_STR_CALLOC(n, sz)     (char *)mi_calloc(n, sz)
+    #define Z_STR_REALLOC(p, sz)    (char *)mi_realloc(p, sz)
+    #define Z_STR_FREE(p)           mi_free(p)
+#else
+    #ifndef Z_STR_MALLOC
+        #define Z_STR_MALLOC(sz)        (char *)Z_MALLOC(sz)
+    #endif
 
-#ifndef Z_STR_CALLOC
-    #define Z_STR_CALLOC(n, sz)     (char *)Z_CALLOC(n, sz)
-#endif
+    #ifndef Z_STR_CALLOC
+        #define Z_STR_CALLOC(n, sz)     (char *)Z_CALLOC(n, sz)
+    #endif
 
-#ifndef Z_STR_REALLOC
-    #define Z_STR_REALLOC(p, sz)    (char *)Z_REALLOC(p, sz)
-#endif
+    #ifndef Z_STR_REALLOC
+        #define Z_STR_REALLOC(p, sz)    (char *)Z_REALLOC(p, sz)
+    #endif
 
-#ifndef Z_STR_FREE
-    #define Z_STR_FREE(p)           Z_FREE(p)
+    #ifndef Z_STR_FREE
+        #define Z_STR_FREE(p)           Z_FREE(p)
+    #endif
 #endif
 
 #if defined(__GNUC__) || defined(__clang__)
@@ -56,29 +65,75 @@ extern "C" {
 // Alias macro for pushing a single char.
 #define zstr_push(s, c) zstr_push_char(s, c)
 
+/* Advanced Optimization Features */
+
+// Detect SIMD capabilities (portable across compilers)
+// Note: Uses #elif to select the highest available instruction set.
+// This is intentional - each level includes all lower levels' functionality.
+#if defined(__AVX2__)
+    #define ZSTR_HAS_AVX2 1
+    #include <immintrin.h>
+#elif defined(__SSE4_2__)
+    #define ZSTR_HAS_SSE42 1
+    #include <nmmintrin.h>
+#elif defined(__SSE2__) || (defined(_MSC_VER) && (defined(_M_X64) || defined(_M_AMD64)))
+    #define ZSTR_HAS_SSE2 1
+    #include <emmintrin.h>
+#endif
+
+// Prefetch support (portable)
+#if defined(__GNUC__) || defined(__clang__)
+    #define ZSTR_PREFETCH(addr) __builtin_prefetch(addr, 0, 3)
+#elif defined(_MSC_VER)
+    #include <intrin.h>
+    #define ZSTR_PREFETCH(addr) _mm_prefetch((const char*)(addr), _MM_HINT_T0)
+#else
+    #define ZSTR_PREFETCH(addr) ((void)0)
+#endif
+
+// OpenMP support detection
+#ifdef _OPENMP
+    #include <omp.h>
+    #define ZSTR_HAS_OPENMP 1
+#endif
+
+// Configuration: Minimum size for using SIMD optimizations
+#ifndef ZSTR_SIMD_THRESHOLD
+    #define ZSTR_SIMD_THRESHOLD 32
+#endif
+
+// Configuration: Minimum batch size for parallel operations
+#ifndef ZSTR_PARALLEL_THRESHOLD
+    #define ZSTR_PARALLEL_THRESHOLD 1000
+#endif
+
 /* Data Structures */
 
 // Heap allocated string layout.
+// Optimized for cache locality: all fields fit in a single cache line
 typedef struct 
 {
-    char   *ptr;
-    size_t len;
-    size_t cap;
+    char   *ptr;    // 8 bytes - pointer to heap allocation
+    size_t len;     // 8 bytes - current length
+    size_t cap;     // 8 bytes - allocated capacity
 } zstr_long;
 
 // Stack allocated (SSO) layout.
+// Optimized for small strings - entire struct fits in 24 bytes
 typedef struct {
-    char buf[ZSTR_SSO_CAP];
-    uint8_t len; 
+    char buf[ZSTR_SSO_CAP];  // 23 bytes - inline buffer
+    uint8_t len;             // 1 byte - current length
 } zstr_short;
 
 // The main string type.
+// Total size: 32 bytes (fits exactly in half a cache line on most systems)
+// The is_long flag is checked frequently, so it's placed first for better prediction
 typedef struct {
-    uint8_t is_long;
-    char _pad[7];   // Padding for alignment on 64-bit systems.
+    uint8_t is_long;  // 1 byte - discriminator: 0=SSO, 1=heap
+    char _pad[7];     // 7 bytes - explicit padding for 8-byte alignment
     union {
-        zstr_long l;
-        zstr_short s;
+        zstr_long l;  // 24 bytes - heap mode
+        zstr_short s; // 24 bytes - stack mode  
     };
 } zstr;
 
@@ -168,9 +223,11 @@ static inline void zstr_clear(zstr *s)
 
 // Ensures the string has at least `new_cap` capacity.
 // Handles the transition from SSO (Stack) to Long (Heap).
+// Note: SSO can hold up to ZSTR_SSO_CAP-1 characters (+ null terminator)
 static inline int zstr_reserve(zstr *s, size_t new_cap)
 {
-    if (new_cap <= ZSTR_SSO_CAP) return Z_OK;
+    // SSO can hold strings of length 0 to ZSTR_SSO_CAP-1 (need space for null terminator)
+    if (new_cap < ZSTR_SSO_CAP) return Z_OK;
     if (s->is_long && new_cap <= s->l.cap) return Z_OK;
 
     char *new_ptr;
@@ -334,35 +391,87 @@ static inline char* zstr_take(zstr *s)
 
 
 // Reads an entire file into a zstr. Returns empty on failure.
+// Optimized for better I/O performance with aligned buffers
 static inline zstr zstr_read_file(const char *path)
 {
     zstr s = zstr_init();
     FILE *f = fopen(path, "rb"); 
     if (!f) return s;
 
+    // Get file size using fseek/ftell
     fseek(f, 0, SEEK_END);
     long length = ftell(f);
     fseek(f, 0, SEEK_SET);
 
-    // Pedantic check.
+    // Pedantic check for invalid file size
     if (length <= 0 || (sizeof(long) > sizeof(size_t) && (size_t)length > (size_t)-1))
     {
         fclose(f);
         return s;
     }
 
-    if (zstr_reserve(&s, (size_t)length) != Z_OK) 
+    // Pre-allocate the needed capacity
+    // Note: reserve() expects capacity for the string content, not including null terminator
+    // For files >= ZSTR_SSO_CAP bytes, we need heap allocation
+    size_t file_size = (size_t)length;
+    if (file_size >= ZSTR_SSO_CAP)
     {
-        fclose(f);
-        return s;
+        // Need heap allocation - reserve space for the file content
+        if (zstr_reserve(&s, file_size) != Z_OK) 
+        {
+            fclose(f);
+            return s;
+        }
     }
+    // else: file fits in SSO buffer (file_size < ZSTR_SSO_CAP means <= 22 bytes)
 
     char *buf = zstr_data(&s);
-    size_t read_count = fread(buf, 1, (size_t)length, f);
-    buf[read_count] = '\0';
+    
+    // Read file in optimized chunks for better cache utilization
+    // Use 64KB chunks which typically align well with filesystem block sizes
+    #define CHUNK_SIZE (64 * 1024)
+    size_t total_read = 0;
+    size_t remaining = (size_t)length;
+    
+    while (remaining > 0)
+    {
+        size_t to_read = (remaining > CHUNK_SIZE) ? CHUNK_SIZE : remaining;
+        size_t read_count = fread(buf + total_read, 1, to_read, f);
+        
+        if (read_count == 0) {
+            // Check if it's an actual error or just EOF
+            if (ferror(f)) {
+                // I/O error occurred - return what we have so far
+                break;
+            }
+            // EOF reached
+            break;
+        }
+        
+        total_read += read_count;
+        remaining -= read_count;
+    }
+    #undef CHUNK_SIZE
+    
+    buf[total_read] = '\0';
 
-    if (s.is_long) s.l.len = read_count;
-    else s.s.len = (uint8_t)read_count;
+    // Update length based on actual bytes read
+    // For SSO, the file must fit within SSO capacity (this should always be true
+    // because we pre-allocated based on file size, but we check defensively)
+    if (s.is_long) {
+        s.l.len = total_read;
+    } else {
+        // Defensive check: SSO can only hold up to ZSTR_SSO_CAP-1 bytes (need space for null terminator)
+        // This branch should only be taken if reserve() didn't transition to long mode
+        if (total_read < ZSTR_SSO_CAP) {
+            s.s.len = (uint8_t)total_read;
+        } else {
+            // This shouldn't happen if reserve worked correctly, but handle it safely
+            // Truncate to max SSO length minus null terminator
+            buf[ZSTR_SSO_CAP - 1] = '\0';
+            s.s.len = ZSTR_SSO_CAP - 1;
+        }
+    }
 
     fclose(f);
     return s;
@@ -503,7 +612,46 @@ static inline void zstr_to_lower(zstr *s)
 {
     char *p = zstr_data(s);
     size_t len = zstr_len(s);
-    for (size_t i = 0; i < len; i++)
+    size_t i = 0;
+    
+#if defined(ZSTR_HAS_AVX2)
+    // AVX2 SIMD optimization for large strings
+    if (len >= 32) {
+        const __m256i A = _mm256_set1_epi8('A');
+        const __m256i Z = _mm256_set1_epi8('Z');
+        const __m256i diff = _mm256_set1_epi8('a' - 'A');
+        
+        for (; i + 32 <= len; i += 32) {
+            __m256i data = _mm256_loadu_si256((__m256i*)(p + i));
+            __m256i mask = _mm256_and_si256(
+                _mm256_cmpgt_epi8(data, _mm256_sub_epi8(A, _mm256_set1_epi8(1))),
+                _mm256_cmpgt_epi8(_mm256_add_epi8(Z, _mm256_set1_epi8(1)), data)
+            );
+            __m256i lower = _mm256_add_epi8(data, _mm256_and_si256(mask, diff));
+            _mm256_storeu_si256((__m256i*)(p + i), lower);
+        }
+    }
+#elif defined(ZSTR_HAS_SSE2)
+    // SSE2 SIMD optimization for medium strings
+    if (len >= 16) {
+        const __m128i A = _mm_set1_epi8('A');
+        const __m128i Z = _mm_set1_epi8('Z');
+        const __m128i diff = _mm_set1_epi8('a' - 'A');
+        
+        for (; i + 16 <= len; i += 16) {
+            __m128i data = _mm_loadu_si128((__m128i*)(p + i));
+            __m128i mask = _mm_and_si128(
+                _mm_cmpgt_epi8(data, _mm_sub_epi8(A, _mm_set1_epi8(1))),
+                _mm_cmpgt_epi8(_mm_add_epi8(Z, _mm_set1_epi8(1)), data)
+            );
+            __m128i lower = _mm_add_epi8(data, _mm_and_si128(mask, diff));
+            _mm_storeu_si128((__m128i*)(p + i), lower);
+        }
+    }
+#endif
+    
+    // Process remaining bytes
+    for (; i < len; i++)
     {
         p[i] = (char)tolower((unsigned char)p[i]);
     }
@@ -514,7 +662,46 @@ static inline void zstr_to_upper(zstr *s)
 {
     char *p = zstr_data(s);
     size_t len = zstr_len(s);
-    for (size_t i = 0; i < len; i++)
+    size_t i = 0;
+    
+#if defined(ZSTR_HAS_AVX2)
+    // AVX2 SIMD optimization for large strings
+    if (len >= 32) {
+        const __m256i a = _mm256_set1_epi8('a');
+        const __m256i z = _mm256_set1_epi8('z');
+        const __m256i diff = _mm256_set1_epi8('A' - 'a');
+        
+        for (; i + 32 <= len; i += 32) {
+            __m256i data = _mm256_loadu_si256((__m256i*)(p + i));
+            __m256i mask = _mm256_and_si256(
+                _mm256_cmpgt_epi8(data, _mm256_sub_epi8(a, _mm256_set1_epi8(1))),
+                _mm256_cmpgt_epi8(_mm256_add_epi8(z, _mm256_set1_epi8(1)), data)
+            );
+            __m256i upper = _mm256_add_epi8(data, _mm256_and_si256(mask, diff));
+            _mm256_storeu_si256((__m256i*)(p + i), upper);
+        }
+    }
+#elif defined(ZSTR_HAS_SSE2)
+    // SSE2 SIMD optimization for medium strings
+    if (len >= 16) {
+        const __m128i a = _mm_set1_epi8('a');
+        const __m128i z = _mm_set1_epi8('z');
+        const __m128i diff = _mm_set1_epi8('A' - 'a');
+        
+        for (; i + 16 <= len; i += 16) {
+            __m128i data = _mm_loadu_si128((__m128i*)(p + i));
+            __m128i mask = _mm_and_si128(
+                _mm_cmpgt_epi8(data, _mm_sub_epi8(a, _mm_set1_epi8(1))),
+                _mm_cmpgt_epi8(_mm_add_epi8(z, _mm_set1_epi8(1)), data)
+            );
+            __m128i upper = _mm_add_epi8(data, _mm_and_si128(mask, diff));
+            _mm_storeu_si128((__m128i*)(p + i), upper);
+        }
+    }
+#endif
+    
+    // Process remaining bytes
+    for (; i < len; i++)
     {
         p[i] = (char)toupper((unsigned char)p[i]);
     }
@@ -630,8 +817,76 @@ static inline bool zstr_eq_ignore_case(const zstr *a, const zstr *b)
     
     const char *p1 = zstr_cstr(a);
     const char *p2 = zstr_cstr(b);
+    size_t i = 0;
     
-    for (size_t i = 0; i < len; i++) {
+#if defined(ZSTR_HAS_AVX2)
+    // AVX2 SIMD optimization
+    if (len >= 32) {
+        const __m256i A_up = _mm256_set1_epi8('A');
+        const __m256i Z_up = _mm256_set1_epi8('Z');
+        const __m256i to_lower = _mm256_set1_epi8('a' - 'A');
+        
+        for (; i + 32 <= len; i += 32) {
+            __m256i v1 = _mm256_loadu_si256((__m256i*)(p1 + i));
+            __m256i v2 = _mm256_loadu_si256((__m256i*)(p2 + i));
+            
+            // Convert both to lowercase
+            __m256i mask1 = _mm256_and_si256(
+                _mm256_cmpgt_epi8(v1, _mm256_sub_epi8(A_up, _mm256_set1_epi8(1))),
+                _mm256_cmpgt_epi8(_mm256_add_epi8(Z_up, _mm256_set1_epi8(1)), v1)
+            );
+            __m256i lower1 = _mm256_add_epi8(v1, _mm256_and_si256(mask1, to_lower));
+            
+            __m256i mask2 = _mm256_and_si256(
+                _mm256_cmpgt_epi8(v2, _mm256_sub_epi8(A_up, _mm256_set1_epi8(1))),
+                _mm256_cmpgt_epi8(_mm256_add_epi8(Z_up, _mm256_set1_epi8(1)), v2)
+            );
+            __m256i lower2 = _mm256_add_epi8(v2, _mm256_and_si256(mask2, to_lower));
+            
+            // Compare
+            __m256i cmp = _mm256_cmpeq_epi8(lower1, lower2);
+            // movemask returns 0xFFFFFFFF when all bytes match
+            if ((uint32_t)_mm256_movemask_epi8(cmp) != 0xFFFFFFFF) {
+                return false;
+            }
+        }
+    }
+#elif defined(ZSTR_HAS_SSE2)
+    // SSE2 SIMD optimization
+    if (len >= 16) {
+        const __m128i A_up = _mm_set1_epi8('A');
+        const __m128i Z_up = _mm_set1_epi8('Z');
+        const __m128i to_lower = _mm_set1_epi8('a' - 'A');
+        
+        for (; i + 16 <= len; i += 16) {
+            __m128i v1 = _mm_loadu_si128((__m128i*)(p1 + i));
+            __m128i v2 = _mm_loadu_si128((__m128i*)(p2 + i));
+            
+            // Convert both to lowercase
+            __m128i mask1 = _mm_and_si128(
+                _mm_cmpgt_epi8(v1, _mm_sub_epi8(A_up, _mm_set1_epi8(1))),
+                _mm_cmpgt_epi8(_mm_add_epi8(Z_up, _mm_set1_epi8(1)), v1)
+            );
+            __m128i lower1 = _mm_add_epi8(v1, _mm_and_si128(mask1, to_lower));
+            
+            __m128i mask2 = _mm_and_si128(
+                _mm_cmpgt_epi8(v2, _mm_sub_epi8(A_up, _mm_set1_epi8(1))),
+                _mm_cmpgt_epi8(_mm_add_epi8(Z_up, _mm_set1_epi8(1)), v2)
+            );
+            __m128i lower2 = _mm_add_epi8(v2, _mm_and_si128(mask2, to_lower));
+            
+            // Compare
+            __m128i cmp = _mm_cmpeq_epi8(lower1, lower2);
+            // movemask returns 0xFFFF when all 16 bytes match
+            if ((uint16_t)_mm_movemask_epi8(cmp) != 0xFFFF) {
+                return false;
+            }
+        }
+    }
+#endif
+    
+    // Process remaining bytes
+    for (; i < len; i++) {
         if (tolower((unsigned char)p1[i]) != tolower((unsigned char)p2[i])) {
             return false;
         }
@@ -957,6 +1212,151 @@ static inline bool zstr_split_next(zstr_split_iter *it, zstr_view *out_part)
     
     return true;
 }
+
+
+/* Bulk Operations with Prefetch and Parallel Optimization */
+
+// Bulk concatenation with prefetch optimization
+// Concatenates multiple strings with optional prefetch for better cache performance
+static inline int zstr_cat_bulk(zstr *dest, const char **sources, size_t count)
+{
+    if (count == 0) return Z_OK;
+    
+    // Calculate total length needed
+    size_t total_len = 0;
+    for (size_t i = 0; i < count; i++)
+    {
+        // Prefetch next string for better cache performance
+        if (i + 1 < count) {
+            ZSTR_PREFETCH(sources[i + 1]);
+        }
+        total_len += strlen(sources[i]);
+    }
+    
+    // Pre-allocate if needed
+    size_t cur_len = zstr_len(dest);
+    size_t final_len = cur_len + total_len;
+    
+    // Only reallocate if current capacity is insufficient
+    // For SSO: capacity is ZSTR_SSO_CAP-1 (need space for null terminator)
+    // For heap: capacity is the max length without null terminator
+    size_t max_len = dest->is_long ? dest->l.cap : (ZSTR_SSO_CAP - 1);
+    if (final_len > max_len)
+    {
+        if (zstr_reserve(dest, final_len) != Z_OK) return Z_ERR;
+    }
+    
+    // Concatenate all strings
+    char *p = zstr_data(dest) + cur_len;
+    for (size_t i = 0; i < count; i++)
+    {
+        if (i + 1 < count) {
+            ZSTR_PREFETCH(sources[i + 1]);
+        }
+        size_t len = strlen(sources[i]);
+        memcpy(p, sources[i], len);
+        p += len;
+    }
+    *p = '\0';
+    
+    // Update length to the actual final length (not capacity)
+    if (dest->is_long) {
+        dest->l.len = final_len;
+    } else {
+        // For SSO, final_len must be < ZSTR_SSO_CAP due to reserve() check above
+        // This assert helps catch logic errors in debug builds
+        #ifdef NDEBUG
+            dest->s.len = (uint8_t)final_len;
+        #else
+            if (final_len >= ZSTR_SSO_CAP) {
+                // This should never happen if reserve() worked correctly
+                return Z_ERR;
+            }
+            dest->s.len = (uint8_t)final_len;
+        #endif
+    }
+    
+    return Z_OK;
+}
+
+// Bulk free operation with optional parallel execution
+static inline void zstr_free_bulk(zstr *strings, size_t count)
+{
+#if defined(ZSTR_HAS_OPENMP) && ZSTR_HAS_OPENMP
+    // Only use parallel for large batches (overhead of thread creation)
+    if (count >= ZSTR_PARALLEL_THRESHOLD)
+    {
+        #pragma omp parallel for schedule(static)
+        for (size_t i = 0; i < count; i++)
+        {
+            zstr_free(&strings[i]);
+        }
+        return;
+    }
+#endif
+    
+    // Sequential with prefetch
+    for (size_t i = 0; i < count; i++)
+    {
+        if (i + 1 < count) {
+            ZSTR_PREFETCH(&strings[i + 1]);
+        }
+        zstr_free(&strings[i]);
+    }
+}
+
+// Bulk uppercase conversion with optional parallel execution
+static inline void zstr_to_upper_bulk(zstr *strings, size_t count)
+{
+#if defined(ZSTR_HAS_OPENMP) && ZSTR_HAS_OPENMP
+    // Only use parallel for large batches
+    if (count >= ZSTR_PARALLEL_THRESHOLD)
+    {
+        #pragma omp parallel for schedule(static)
+        for (size_t i = 0; i < count; i++)
+        {
+            zstr_to_upper(&strings[i]);
+        }
+        return;
+    }
+#endif
+    
+    // Sequential with prefetch
+    for (size_t i = 0; i < count; i++)
+    {
+        if (i + 1 < count) {
+            ZSTR_PREFETCH(&strings[i + 1]);
+        }
+        zstr_to_upper(&strings[i]);
+    }
+}
+
+// Bulk lowercase conversion with optional parallel execution
+static inline void zstr_to_lower_bulk(zstr *strings, size_t count)
+{
+#if defined(ZSTR_HAS_OPENMP) && ZSTR_HAS_OPENMP
+    // Only use parallel for large batches
+    if (count >= ZSTR_PARALLEL_THRESHOLD)
+    {
+        #pragma omp parallel for schedule(static)
+        for (size_t i = 0; i < count; i++)
+        {
+            zstr_to_lower(&strings[i]);
+        }
+        return;
+    }
+#endif
+    
+    // Sequential with prefetch
+    for (size_t i = 0; i < count; i++)
+    {
+        if (i + 1 < count) {
+            ZSTR_PREFETCH(&strings[i + 1]);
+        }
+        zstr_to_lower(&strings[i]);
+    }
+}
+
 
 #if defined(Z_HAS_CLEANUP) && Z_HAS_CLEANUP
     #define zstr_autofree  Z_CLEANUP(zstr_free) zstr

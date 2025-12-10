@@ -5,3 +5,4 @@ benchmarks/c/sds.h
 benchmarks/c/sdsalloc.h
 benchmarks/c/bench_sds
 benchmarks/c/bench_c
+benchmarks/c/bench_optimized
