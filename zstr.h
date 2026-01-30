@@ -317,7 +317,7 @@ static inline void zstr_clear(zstr *s)
 // Handles the transition from SSO (Stack) to Long (Heap).
 static inline int zstr_reserve(zstr *s, size_t new_cap)
 {
-    if (new_cap < ZSTR_SSO_CAP) return Z_OK;
+    if (new_cap + 1 <= ZSTR_SSO_CAP) return Z_OK;
     if (s->is_long && new_cap <= s->l.cap) return Z_OK;
 
     char *new_ptr;
@@ -354,7 +354,7 @@ static inline int zstr_reserve(zstr *s, size_t new_cap)
 static inline zstr zstr_with_capacity(size_t cap)
 {
     zstr s = zstr_init();
-    if (cap > ZSTR_SSO_CAP)
+    if (cap >= ZSTR_SSO_CAP)
     {
         zstr_reserve(&s, cap);
     }
@@ -367,7 +367,7 @@ static inline void zstr_shrink_to_fit(zstr *s)
     if (!s->is_long) return;
 
     // Downgrade to SSO if possible.
-    if (s->l.len <= ZSTR_SSO_CAP)
+    if (s->l.len < ZSTR_SSO_CAP)
     {
         char temp[ZSTR_SSO_CAP];
         memcpy(temp, s->l.ptr, s->l.len);
@@ -437,7 +437,7 @@ static inline zstr zstr_own(char *ptr, size_t len, size_t cap)
 {
     zstr s = zstr_init();
     
-    if (cap <= ZSTR_SSO_CAP)
+    if (cap < ZSTR_SSO_CAP)
     {
         memcpy(s.s.buf, ptr, len);
         s.s.buf[len] = '\0';
@@ -1331,7 +1331,7 @@ namespace z_str
         char *data()              { return ::zstr_data(&inner); }
         size_t size() const       { return ::zstr_len(&inner); }
         size_t length() const     { return ::zstr_len(&inner); }
-        size_t capacity() const   { return inner.is_long ? inner.l.cap : ZSTR_SSO_CAP; }
+        size_t capacity() const   { return inner.is_long ? inner.l.cap : (ZSTR_SSO_CAP - 1); }
         bool is_empty() const     { return ::zstr_is_empty(&inner); }
 
 #       if __cplusplus >= 201703L
